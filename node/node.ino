@@ -105,9 +105,6 @@ void process_command(uint8_t* msg, size_t size) {
     case 'W':
       if (debug) Serial.println("Wait");
       break;
-    case 'L':
-      if (debug) Serial.println("LED");
-      break;
     default:
       Serial.println("Unknown command!");
       break;
