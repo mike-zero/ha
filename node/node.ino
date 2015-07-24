@@ -18,7 +18,7 @@
  * Adaption to Enc28J60 by Norbert Truchsess <norbert.truchsess@t-online.de>
  */
 
-#include <string.h>
+//#include <string.h>
 #include <UIPEthernet.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
@@ -33,7 +33,12 @@
 #define DHT_MIN_PIN 3
 #define DHT_MAX_PIN 9
 
-uint8_t debug = 0;
+uint8_t debug = 1;
+
+uint8_t buf_in[CH_COUNT][BUF_LEN];
+uint8_t buf_out[CH_COUNT][BUF_LEN];
+uint8_t buf_pos[CH_COUNT];
+size_t answer_size = 0;
 
 dht DHT;
 
@@ -51,8 +56,9 @@ EthernetServer server = EthernetServer(1000);
 uint8_t term = '\n';
 
 void setup() {
+  memset(buf_pos, 0, sizeof(buf_pos));
   Serial.begin(115200);
-  Serial.print("Node #");
+  Serial.print(F("Node #"));
   Serial.println(NODE_ID);
   uint8_t mac[6] = {0x02,0x00,0x00,0x00,0x00,NODE_ID};
   IPAddress myIP(192, 168, 137, 20 + NODE_ID);
@@ -61,42 +67,78 @@ void setup() {
 }
 
 void loop() {
-  size_t size;
-  size_t start;
-  size_t finish;
+  // Serial
+  while (Serial.available() > 0) {
+    char thisChar = Serial.read();
+    answer_size = process_byte(thisChar, CH_SERIAL);
+    if (answer_size > 0) Serial.write(buf_out[CH_SERIAL], answer_size);
+  }
 
+  // Ethernet
   if (EthernetClient client = server.available()) {
-    while((size = client.available()) > 0) {
-        uint8_t* msg = (uint8_t*)malloc(size);
-        size = client.read(msg,size);
-        start = 0;
-        finish = 0;
-
-        while (start < size) {
-          finish = start;
-          while(finish < size && msg[finish] != term) finish++;
-          process_command(&msg[start], finish-start);
-          start = finish+1;
-        }
-        free(msg);
-      }
-      client.println("DATA from Server!");
-      client.stop();
+    buf_pos[CH_ETH] = 0;
+    while (client.available() > 0) {
+      char thisChar = client.read();
+      answer_size = process_byte(thisChar, CH_ETH);
+      if (answer_size > 0) client.write(buf_out[CH_ETH], answer_size);
     }
+    if (buf_pos[CH_ETH] > 0) {
+      answer_size = process_byte(term, CH_ETH);
+      if (answer_size > 0) client.write(buf_out[CH_ETH], answer_size);
+    }
+    client.println("Bye!");
+    client.stop();
+    buf_pos[CH_ETH] = 0;
+  }
 }
 
-void process_command(uint8_t* msg, size_t size) {
+size_t process_byte(uint8_t inbyte, uint8_t channel_id) {
+  size_t res = 0;
   if (debug) {
-    Serial.print("New command (");
+    Serial.print(F("New byte: "));
+    if (inbyte < 16) Serial.print("0");
+    Serial.println(inbyte, HEX);
+  }
+  if (inbyte == term) {
+    if (buf_pos[channel_id] > 0) {
+      process_command(buf_in[channel_id], buf_pos[channel_id], buf_out[channel_id], &answer_size);
+      res = answer_size;
+    }
+    buf_pos[channel_id] = 0;
+  } else {
+    if (buf_pos[channel_id] < BUF_LEN) {
+      buf_in[channel_id][buf_pos[channel_id]++] = inbyte;
+    }
+  }
+  return res;
+}
+
+void process_command(uint8_t* msg, size_t size, uint8_t* answer, size_t* answer_size) {
+  *answer_size = 0;
+  if (debug) {
+    Serial.print(F("New command ("));
     Serial.print(size);
     Serial.print("): |");
     Serial.write(msg,size);
+    Serial.print("|");
+    for (uint8_t i = 0; i < size; i++) {
+      if (i > 0) Serial.print(" ");
+      if (msg[i] < 16) Serial.print("0");
+      Serial.print(msg[i], HEX);
+    }
     Serial.println("|");
   }
   switch (msg[0]) {
     case 'D':
-      debug = !debug;
-      Serial.print("Debug set to ");
+      if (size > 1) {
+        debug = (msg[1] == 0 || msg[1] == '0') ? 0 : 1;
+      } else {
+        debug = !debug;
+      }
+      *answer_size = 2;
+      answer[0] = 'D';
+      answer[1] = '0' + (debug ? 1 : 0);
+      Serial.print(F("Debug set to "));
       Serial.println(debug ? "ON" : "OFF");
       break;
     case 'I':
@@ -106,8 +148,21 @@ void process_command(uint8_t* msg, size_t size) {
       if (debug) Serial.println("Wait");
       break;
     default:
-      Serial.println("Unknown command!");
+      Serial.println(F("Unknown command!"));
       break;
+  }
+  if (debug) {
+    if (answer_size > 0) {
+      Serial.print(F("Got answer! answer_size="));
+      Serial.print(*answer_size);
+      Serial.print(F(", answer="));
+      for (uint8_t i = 0; i < *answer_size; i++) {
+        if (i > 0) Serial.print(" ");
+        if (answer[i] < 16) Serial.print("0");
+        Serial.print(answer[i], HEX);
+      }
+      Serial.println();
+    }
   }
 }
 
