@@ -33,12 +33,10 @@
 #define DHT_MIN_PIN 3
 #define DHT_MAX_PIN 9
 
-uint8_t debug = 1;
+uint8_t debug = 0;
 
 uint8_t buf_in[CH_COUNT][BUF_LEN];
-uint8_t buf_out[CH_COUNT][BUF_LEN];
 uint8_t buf_pos[CH_COUNT];
-size_t answer_size = 0;
 
 dht DHT;
 
@@ -48,8 +46,6 @@ OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 int numberOfDevices; // Number of temperature devices found
 DeviceAddress tempDeviceAddress; // We'll use this variable to store a found device address
-
-int ledPin = 13;
 
 EthernetServer server = EthernetServer(1000);
 
@@ -70,8 +66,7 @@ void loop() {
   // Serial
   while (Serial.available() > 0) {
     char thisChar = Serial.read();
-    answer_size = process_byte(thisChar, CH_SERIAL);
-    if (answer_size > 0) Serial.write(buf_out[CH_SERIAL], answer_size);
+    process_byte(thisChar, CH_SERIAL, &Serial);
   }
 
   // Ethernet
@@ -79,12 +74,10 @@ void loop() {
     buf_pos[CH_ETH] = 0;
     while (client.available() > 0) {
       char thisChar = client.read();
-      answer_size = process_byte(thisChar, CH_ETH);
-      if (answer_size > 0) client.write(buf_out[CH_ETH], answer_size);
+      process_byte(thisChar, CH_ETH, &client);
     }
     if (buf_pos[CH_ETH] > 0) {
-      answer_size = process_byte(term, CH_ETH);
-      if (answer_size > 0) client.write(buf_out[CH_ETH], answer_size);
+      process_byte(term, CH_ETH, &client);
     }
     client.println("Bye!");
     client.stop();
@@ -92,7 +85,7 @@ void loop() {
   }
 }
 
-size_t process_byte(uint8_t inbyte, uint8_t channel_id) {
+size_t process_byte(uint8_t inbyte, uint8_t channel_id, Stream* strm) {
   size_t res = 0;
   if (debug) {
     Serial.print(F("New byte: "));
@@ -101,8 +94,7 @@ size_t process_byte(uint8_t inbyte, uint8_t channel_id) {
   }
   if (inbyte == term) {
     if (buf_pos[channel_id] > 0) {
-      process_command(buf_in[channel_id], buf_pos[channel_id], buf_out[channel_id], &answer_size);
-      res = answer_size;
+      process_command(channel_id, strm);
     }
     buf_pos[channel_id] = 0;
   } else {
@@ -113,10 +105,11 @@ size_t process_byte(uint8_t inbyte, uint8_t channel_id) {
   return res;
 }
 
-void process_command(uint8_t* msg, size_t size, uint8_t* answer, size_t* answer_size) {
-  *answer_size = 0;
+void process_command(uint8_t channel_id, Stream* strm) {
+  uint8_t* msg = buf_in[channel_id];
+  size_t size = buf_pos[channel_id];
   if (debug) {
-    Serial.print(F("New command ("));
+    Serial.print(F("Got command ("));
     Serial.print(size);
     Serial.print("): |");
     Serial.write(msg,size);
@@ -135,34 +128,23 @@ void process_command(uint8_t* msg, size_t size, uint8_t* answer, size_t* answer_
       } else {
         debug = !debug;
       }
-      *answer_size = 2;
-      answer[0] = 'D';
-      answer[1] = '0' + (debug ? 1 : 0);
+      strm->write('D');
+      strm->write('0' + (debug ? 1 : 0));
       Serial.print(F("Debug set to "));
       Serial.println(debug ? "ON" : "OFF");
       break;
     case 'I':
       if (debug) Serial.println("Init!");
+      strm->write("I");
       break;
     case 'W':
       if (debug) Serial.println("Wait");
+      strm->write("W");
       break;
     default:
       Serial.println(F("Unknown command!"));
       break;
   }
-  if (debug) {
-    if (answer_size > 0) {
-      Serial.print(F("Got answer! answer_size="));
-      Serial.print(*answer_size);
-      Serial.print(F(", answer="));
-      for (uint8_t i = 0; i < *answer_size; i++) {
-        if (i > 0) Serial.print(" ");
-        if (answer[i] < 16) Serial.print("0");
-        Serial.print(answer[i], HEX);
-      }
-      Serial.println();
-    }
-  }
 }
 
+// if (((signed long)(millis()-next))>0)
