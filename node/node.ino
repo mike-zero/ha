@@ -39,6 +39,8 @@ uint8_t buf_in[CH_COUNT][BUF_LEN];
 uint8_t buf_pos[CH_COUNT];
 
 dht DHT;
+uint16_t DHT_pins = 0;
+uint16_t OW_pins = 0;
 
 // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
 OneWire oneWire(ONE_WIRE_BUS);
@@ -46,6 +48,8 @@ OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 int numberOfDevices; // Number of temperature devices found
 DeviceAddress tempDeviceAddress; // We'll use this variable to store a found device address
+
+byte ow_addr[8];
 
 EthernetServer server = EthernetServer(1000);
 
@@ -122,7 +126,7 @@ void process_command(uint8_t channel_id, Stream* strm) {
     Serial.println("|");
   }
   switch (msg[0]) {
-    case 'D':
+    case 'D': // Debug
       if (size > 1) {
         debug = (msg[1] == 0 || msg[1] == '0') ? 0 : 1;
       } else {
@@ -133,13 +137,89 @@ void process_command(uint8_t channel_id, Stream* strm) {
       Serial.print(F("Debug set to "));
       Serial.println(debug ? "ON" : "OFF");
       break;
-    case 'I':
+    case 'R': // Read
+      if (size == 4) {
+        uint8_t mask_d = msg[2] & 0xFF;
+        uint8_t mask_b = msg[3] & 0xFF;
+        uint8_t mask_a = msg[1] & 0xFF;
+
+        if (mask_d) { 
+          strm->write(DDRD & mask_d);
+          strm->write(PORTD & mask_d);
+          strm->write(PIND & mask_d);
+        }
+        if (mask_b) { 
+          strm->write(DDRB & mask_b);
+          strm->write(PORTB & mask_b);
+          strm->write(PINB & mask_b);
+        }
+
+        uint8_t i = 0;
+        int val;
+        strm->write(mask_a);
+        while (mask_a > 0) {
+          if ((mask_a & 1) == 1) {
+            val = analogRead(i);
+            strm->write(highByte(val));
+            strm->write(lowByte(val));
+            if (debug) {
+              Serial.print("analogRead(");
+              Serial.print(i);
+              Serial.print(")=");
+              Serial.println(val);
+            }
+          }
+          i++;
+          mask_a >>= 1;
+        }
+      } else {
+        strm->write("R-err");
+      }
+      break;
+    case 'I': // Init
       if (debug) Serial.println("Init!");
       strm->write("I");
       break;
-    case 'W':
+    case 'W': // Wait
       if (debug) Serial.println("Wait");
       strm->write("W");
+      break;
+    case 'S': // Scan
+      if (debug) Serial.println("Scan...");
+      strm->write("S");
+      DHT_pins = 0;
+      OW_pins = 0;
+      for (uint8_t pin = DHT_MIN_PIN; pin <= DHT_MAX_PIN; i++) {
+        if (debug) Serial.println(pin);
+        int chk = DHT.read22(pin);
+        if (chk == DHTLIB_OK) {
+          DHT_pins |= 1 << pin;
+          if (debug) {
+            Serial.print("DHT22 found on pin ");
+            Serial.println(pin);
+          }
+        } else {
+          // 1-wire?
+          OneWire ds(pin);
+          if (ds.search(ow_addr)) {
+            OW_pins |= 1 << pin;
+            if (debug) {
+              Serial.print("ow[");
+              Serial.print(pin);
+              Serial.print("] R=");
+              for (i = 0; i < 8; i++) {
+                Serial.print(ow_addr[i], HEX);
+                Serial.print(" ");
+              }
+              Serial.println();
+            }
+          }
+        }
+      }
+      strm->write(highByte(DHT_pins));
+      strm->write(lowByte(DHT_pins));
+      strm->write(highByte(OW_pins));
+      strm->write(lowByte(OW_pins));
       break;
     default:
       Serial.println(F("Unknown command!"));
