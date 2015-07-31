@@ -18,6 +18,7 @@
  * Adaption to Enc28J60 by Norbert Truchsess <norbert.truchsess@t-online.de>
  */
 
+#define SERIAL_ENABLE
 //#define ETHERNET_ENABLE
 
 //#include <string.h>
@@ -32,21 +33,43 @@
 
 #include "node.h"
 
+#ifdef SERIAL_ENABLE
+#define GPIO_SERIAL_MASK 0b0000000000000011  // digital pins 0, 1
+#else
+#define GPIO_SERIAL_MASK 0
+#endif
+
+#ifdef ETHERNET_ENABLE
+#define GPIO_ETH_MASK 0b0011110000000100  // digital pins 2, 10-13
+#else
+#define GPIO_ETH_MASK 0
+#define LED 13  // uncomment this line to show command processing
+#endif
+
 #define TEMPERATURE_PRECISION 12
-#define GPIO_MASK 0b0000000111111000  // TODO: set all usefull bits, then clear used by Eth, LED, Serial, interrupts, etc.
 
 uint8_t debug = 0;
 uint8_t textmode = 0;
 
 #ifdef ETHERNET_ENABLE
-//#define ETH_RESET_PIN 9 // uncomment to be able to reset it manually
+//#define ETH_RESET_PIN 9 // uncomment this line to be able to reset ethernet module manually
 uint8_t mac[6] = {0x02,0x00,0x00,0x00,0x00,NODE_ID};
 IPAddress myIP(192, 168, 137, 20 + NODE_ID);
 #endif
 
-#ifndef ETHERNET_ENABLE
-#define LED 13  // uncomment to show command processing
+#ifdef LED
+#define GPIO_LED_MASK 0b0010000000000000  // digital pin 13
+#else
+#define GPIO_LED_MASK 0
 #endif
+
+#ifdef ETH_RESET_PIN
+#define GPIO_ETH_RESET_MASK 0b0000001000000000  // digital pin 9
+#else
+#define GPIO_ETH_RESET_MASK 0
+#endif
+
+#define GPIO_MASK 0b0011111111111111 & GPIO_SERIAL_MASK & ~GPIO_ETH_MASK & ~GPIO_ETH_RESET_MASK & ~GPIO_LED_MASK  // TODO: set all usefull bits, then clear used by Eth, LED, Serial, interrupts, etc.
 
 uint8_t buf_in[CH_COUNT][BUF_LEN];
 uint8_t buf_pos[CH_COUNT];
