@@ -25,7 +25,7 @@
 
 #ifdef LED
   #if ((1 << LED) & (GPIO_SERIAL_MASK | GPIO_ETH_MASK)) == 0 // LED pin is not used by another device
-    #define GPIO_LED_MASK 1 << LED
+    #define GPIO_LED_MASK (1 << LED)
   #else
     #undef LED
     #define GPIO_LED_MASK 0
