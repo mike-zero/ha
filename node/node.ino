@@ -1,69 +1,38 @@
 /*
  * A multi-purpose sensor node, controlled by unified commands via Serial
  * and/or UIPEthernet (ENC28J60 module).
+ * 
+ * Common abilities: A/D GPIO read/write, impulse counter,
+ * 1-wire thermometers (DS18B20), DHT22 
  */
 
 #define SERIAL_ENABLE
 //#define ETHERNET_ENABLE
-
-//#include <string.h>
-
-#ifdef ETHERNET_ENABLE
-#include <UIPEthernet.h>
-#endif
+#define TEMPERATURE_PRECISION 12
 
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <dht.h>
 
+#include "node_config.h"
 #include "node.h"
 
-#ifdef SERIAL_ENABLE
-#define GPIO_SERIAL_MASK 0b0000000000000011  // digital pins 0, 1
-#else
-#define GPIO_SERIAL_MASK 0
-#endif
-
 #ifdef ETHERNET_ENABLE
-#define GPIO_ETH_MASK 0b0011110000000100  // digital pins 2, 10-13
-#else
-#define GPIO_ETH_MASK 0
-#define LED 13  // uncomment this line to show command processing
+#include <UIPEthernet.h>
 #endif
-
-#define TEMPERATURE_PRECISION 12
 
 uint8_t debug = 0;
 uint8_t textmode = 0;
 
-#ifdef ETHERNET_ENABLE
-//#define ETH_RESET_PIN 9 // uncomment this line to be able to reset ethernet module manually
-uint8_t mac[6] = {0x02,0x00,0x00,0x00,0x00,NODE_ID};
-IPAddress myIP(192, 168, 137, 20 + NODE_ID);
-#endif
-
-#ifdef LED
-#define GPIO_LED_MASK 0b0010000000000000  // digital pin 13
-#else
-#define GPIO_LED_MASK 0
-#endif
-
-#ifdef ETH_RESET_PIN
-#define GPIO_ETH_RESET_MASK 0b0000001000000000  // digital pin 9
-#else
-#define GPIO_ETH_RESET_MASK 0
-#endif
-
-#define GPIO_MASK 0b0011111111111111 & GPIO_SERIAL_MASK & ~GPIO_ETH_MASK & ~GPIO_ETH_RESET_MASK & ~GPIO_LED_MASK  // TODO: set all usefull bits, then clear used by Eth, LED, Serial, interrupts, etc.
-
 uint8_t buf_in[CH_COUNT][BUF_LEN];
 uint8_t buf_pos[CH_COUNT];
 
-dht DHT;
 uint16_t DHT_pins = 0;
 uint16_t OW_pins = 0;
 
 byte ow_addr[8];
+
+dht DHT;
 
 #ifdef ETHERNET_ENABLE
 EthernetServer server = EthernetServer(1000);
@@ -80,8 +49,8 @@ void setup() {
   eth_init();
 #endif
 #ifdef LED
-pinMode(LED, OUTPUT);
-digitalWrite(LED, LOW);
+  pinMode(LED, OUTPUT);
+  digitalWrite(LED, LOW);
 #endif
   Serial.print(F("Free RAM = "));
   Serial.print(freeRam());
@@ -115,13 +84,6 @@ void loop() {
 
 size_t process_byte(uint8_t inbyte, uint8_t channel_id, Stream* strm) {
   size_t res = 0;
-/*
-  if (debug) {
-    Serial.print(F("New byte: "));
-    if (inbyte < 16) Serial.print("0");
-    Serial.println(inbyte, HEX);
-  }
-*/
   if (inbyte == term) {
     if (buf_pos[channel_id] > 0) {
       process_command(channel_id, strm);
