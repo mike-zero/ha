@@ -12,7 +12,7 @@
 #endif
 
 #ifdef ETH_RESET_PIN
-  #define GPIO_ETH_RESET_MASK 1 << ETH_RESET_PIN
+  #define GPIO_ETH_RESET_MASK (1 << ETH_RESET_PIN)
 #else
   #define GPIO_ETH_RESET_MASK 0
 #endif
