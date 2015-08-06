@@ -6,10 +6,6 @@
  * 1-wire thermometers (DS18B20), DHT22 
  */
 
-#define SERIAL_ENABLE
-//#define ETHERNET_ENABLE
-#define TEMPERATURE_PRECISION 12
-
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <dht.h>
@@ -35,6 +31,7 @@ byte ow_addr[8];
 dht DHT;
 
 #ifdef ETHERNET_ENABLE
+IPAddress myIP(IP);
 EthernetServer server = EthernetServer(1000);
 #endif
 
@@ -315,7 +312,7 @@ void process_command(uint8_t channel_id, Stream* strm) {
 
 // if (((signed long)(millis()-next))>0)
 
-int freeRam () {
+int freeRam() {
   extern int __heap_start, *__brkval; 
   int v; 
   return (int) &v - (__brkval == 0 ? (int) &__heap_start : (int) __brkval); 
