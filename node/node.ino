@@ -26,7 +26,7 @@ uint8_t buf_pos[CH_COUNT];
 uint16_t DHT_pins = 0;
 uint16_t OW_pins = 0;
 
-byte ow_addr[8];
+DeviceAddress ow_addr;
 
 dht DHT;
 
@@ -72,7 +72,7 @@ void loop() {
     if (buf_pos[CH_ETH] > 0) {
       process_byte(term, CH_ETH, &client);
     }
-    client.println("Bye!");
+    // client.println("Bye!");
     client.stop();
     buf_pos[CH_ETH] = 0;
   }
@@ -181,34 +181,156 @@ void process_command(uint8_t channel_id, Stream* strm) {
       break;
     case 'T': // Test
       if (debug) Serial.println("Test:");
-      if (size == 3) {
-        uint16_t mask = 0b0000000111111000; // (msg[1] << 8) & msg[2];
+      strm->write("T");
+      {
+        uint16_t mask = GPIO_MASK; // (msg[1] << 8) & msg[2];
+        uint16_t mask_ow = 0;
+        uint16_t mask_dht = 0;
         uint8_t pin = 0;
+
         while (mask > 0) {
           if ((mask & 1) == 1) {
-                        Serial.print("ow[");
-                        Serial.print(pin);
-                        OneWire ds(pin);
-                        while (ds.search(ow_addr)) {
-                          strm->write(ow_addr, 8);
-                          if (debug) {
-                            for (uint8_t i = 0; i < 8; i++) {
-                              Serial.print("] R=");
-                              Serial.print(ow_addr[i], HEX);
-                              Serial.print(" ");
-                            }
-                            Serial.println();
-                          }
-                        }
-                        Serial.println();
-
+            int chk = DHT.read22(pin);
+            if (chk == DHTLIB_OK) {
+              mask_dht |= 1 << pin;
+              if (debug) {
+                Serial.print("#0 DHT22 found on pin ");
+                Serial.print(pin);
+                Serial.print(": ");
+                Serial.print(DHT.humidity, 1);
+                Serial.print(",\t");
+                Serial.print(DHT.temperature, 1);
+                Serial.println();
+              }
+            }
           }
           pin++;
           mask >>= 1;
         }
+        unsigned long dht_conv_ready_time = millis() + 450; // minimum tested is 410 at -15*C and 370 at +24*C, see libraries/DHTlib/examples/dht_tuning/dht_tuning.ino
+        strm->write(highByte(mask_dht));
+        strm->write(lowByte(mask_dht));
 
-      } else {
-        strm->write("T-err");
+        mask = GPIO_MASK & ~ mask_dht;
+        pin = 0;
+        uint8_t numberOfDevices = 0; // Number of temperature devices found
+        while (mask > 0) {
+          if ((mask & 1) == 1) {
+            OneWire ds(pin);
+            DallasTemperature sensors(&ds);
+            sensors.begin();
+            sensors.setWaitForConversion(0);
+            numberOfDevices += sensors.getDeviceCount();
+            if (sensors.getDeviceCount() > 0) {	// !!!!!!!!!!!! ��������� � ������ � �������� ����� ������� ����������; � ���������� �������� ����� ������� (������/��������, ���� �� ���������)
+              sensors.requestTemperatures();
+              mask_ow |= 1 << pin;
+            }
+          }
+          pin++;
+          mask >>= 1;
+        }
+        unsigned long ow_conv_ready_time = millis() + millisToWaitForConversion(TEMPERATURE_PRECISION);
+        //strm->write(highByte(mask_ow));
+        //strm->write(lowByte(mask_ow));
+
+        strm->write(numberOfDevices);
+
+// ...
+
+        if (mask_dht > 0) {
+          while (((signed long)(millis() - dht_conv_ready_time))<0) delay(5);
+          pin = 0;
+          mask = mask_dht;
+          int16_t tmp = 0;
+          while (mask > 0) {
+            if ((mask & 1) == 1) {
+              int chk = DHT.read22(pin);
+              if (chk == DHTLIB_OK) {
+                if (debug) {
+                  Serial.print("#1 DHT22 found on pin ");
+                  Serial.print(pin);
+                  Serial.print(": ");
+                  Serial.print(DHT.humidity, 1);
+                  Serial.print(",\t");
+                  Serial.print(DHT.temperature, 1);
+                  Serial.println();
+                }
+                tmp = DHT.temperature * 10;
+                strm->write(highByte(tmp));
+                strm->write(lowByte(tmp));
+                tmp = DHT.humidity * 10;
+                strm->write(highByte(tmp));
+                strm->write(lowByte(tmp));
+              } else {
+                for (uint8_t i = 0; i < 4; i++) {
+                  strm->write(0xFF); // NAN?
+                }
+              }
+            }
+            pin++;
+            mask >>= 1;
+          }
+        }
+// ...
+
+        if (mask_ow > 0) {
+          while (((signed long)(millis() - ow_conv_ready_time))<0) delay(5);
+
+          mask = mask_ow; // GPIO_MASK; // (msg[1] << 8) & msg[2];
+          pin = 0;
+          while (mask > 0 && numberOfDevices > 0) {
+            if ((mask & 1) == 1) {
+              if (debug) {
+                Serial.print("ow[");
+                Serial.print(pin);
+                Serial.print("]");
+              }
+              OneWire ds(pin);
+
+              DallasTemperature sensors(&ds);
+//              sensors.begin();
+//              numberOfDevices = sensors.getDeviceCount();
+
+                ds.reset_search();
+                while (ds.search(ow_addr)  && numberOfDevices > 0) {
+                  if (debug) {
+                    for (uint8_t i = 0; i < 8; i++) {
+                      Serial.print(" ");
+                      if (ow_addr[i] < 0x10) {
+                        Serial.print("0");
+                      }
+                      Serial.print(ow_addr[i], HEX);
+                    }
+                    Serial.print(" | ");
+                  }
+                  if (ow_addr[0] == 0x28) {
+                    int16_t temp = sensors.getTemp(ow_addr);
+                    if (debug) {
+                      Serial.print(": ");
+                      Serial.print(sensors.rawToCelsius(temp));
+                    }
+                    if (temp != DEVICE_DISCONNECTED_RAW) {
+                      strm->write(ow_addr, sizeof(ow_addr));
+                      strm->write(highByte(temp));
+                      strm->write(lowByte(temp));
+                    }
+                    sensors.setResolution(ow_addr, TEMPERATURE_PRECISION);  // for next time
+                  }
+                  --numberOfDevices;
+                }
+                if (debug) {
+                  Serial.println();
+                }
+            }
+            pin++;
+            mask >>= 1;
+          }
+          while (numberOfDevices > 0) {
+            for (int i=0; i<10; i++) {  // placeholder for 8 bytes address and 2 bytes of payload
+              strm->write(0xFF);
+            }
+          }
+        }
       }
       // strm->write("T");
       break;
@@ -283,12 +405,6 @@ void process_command(uint8_t channel_id, Stream* strm) {
     case 'Z': // Reset (zero) some parts or all
 #ifdef ETH_RESET_PIN
       if (msg[1] == 'e') {
-        pinMode(ETH_RESET_PIN, OUTPUT);
-        digitalWrite(ETH_RESET_PIN, LOW);
-        delay(100);
-        digitalWrite(ETH_RESET_PIN, HIGH);
-        pinMode(ETH_RESET_PIN, INPUT);
-        delay(1000);
         eth_init();
       }
 #endif
@@ -310,8 +426,6 @@ void process_command(uint8_t channel_id, Stream* strm) {
 #endif
 }
 
-// if (((signed long)(millis()-next))>0)
-
 int freeRam() {
   extern int __heap_start, *__brkval; 
   int v; 
@@ -328,8 +442,29 @@ void printAddress(DeviceAddress deviceAddress) {
 
 #ifdef ETHERNET_ENABLE
 void eth_init() {
+  pinMode(ETH_RESET_PIN, OUTPUT);
+  digitalWrite(ETH_RESET_PIN, LOW);
+  delay(100);
+  digitalWrite(ETH_RESET_PIN, HIGH);
+  pinMode(ETH_RESET_PIN, INPUT);
+  delay(1000);
   Ethernet.begin(mac,myIP);
   server.begin();
 }
 #endif
 
+// returns number of milliseconds to wait till conversion is complete (based on IC datasheet)
+int16_t millisToWaitForConversion(uint8_t bitResolution){
+
+    switch (bitResolution){
+    case 9:
+        return 94;
+    case 10:
+        return 188;
+    case 11:
+        return 375;
+    default:
+        return 750;
+    }
+
+}
