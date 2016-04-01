@@ -35,7 +35,7 @@ void fast_measure() {
 }
 
 void slow_measure() {
-	# TODO: add measure phases, remember the start_time, wake_up for every phase and advance to the next
+	// TODO: add measure phases, remember the start_time, wake_up for every phase and advance to the next
 	next_slow_measure = millis() + slow_measure_period;
 	Serial.print(millis());
 	Serial.println(" Slow");
