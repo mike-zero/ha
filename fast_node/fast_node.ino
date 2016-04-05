@@ -27,6 +27,7 @@ unsigned long next_slow_measure = 0;
 
 unsigned long fast_measure_period = fast_measures_per_report > 0 ? report_period_millis / fast_measures_per_report : 0;
 unsigned long slow_measure_period = slow_measures_per_report > 0 ? report_period_millis / slow_measures_per_report : 0;
+unsigned long current_millis;
 signed long wait_millis;
 signed long wait_millis_temp;
 
@@ -55,9 +56,10 @@ void setup() {
 }
 
 void loop() {
+	current_millis = millis();
 	wait_millis = report_period_millis;	// cannot be more than the report period
 	if (fast_measures_per_report > 0) {
-		wait_millis_temp = (signed long)(next_fast_measure - millis());
+		wait_millis_temp = (signed long)(next_fast_measure - current_millis);
 		if (wait_millis_temp <= 0) {
 			fast_measure();
 			return;
@@ -66,7 +68,7 @@ void loop() {
 		}
 	}
 	if (slow_measures_per_report > 0) {
-		wait_millis_temp = (signed long)(next_slow_measure - millis());
+		wait_millis_temp = (signed long)(next_slow_measure - current_millis);
 		if (wait_millis_temp <= 0) {
 			slow_measure();
 			return;
@@ -74,7 +76,7 @@ void loop() {
 			if (wait_millis_temp < wait_millis) wait_millis = wait_millis_temp;
 		}
 	}
-	wait_millis_temp = (signed long)(next_report_time - millis());
+	wait_millis_temp = (signed long)(next_report_time - current_millis);
 	if (wait_millis_temp <= 0) {
 		report();
 		return;
@@ -84,7 +86,7 @@ void loop() {
 #ifdef LED
 	digitalWrite(LED, LOW);
 #endif
-	delay(wait_millis - 1);
+	delay(millis() - current_millis + wait_millis);
 #ifdef LED
 	digitalWrite(LED, HIGH);
 #endif
