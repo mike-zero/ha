@@ -30,6 +30,8 @@
 
 #define YIELD yield()
 
+#define RH_FLAGS_HAS_POWER_INFO 0x01
+
 const unsigned long main_period = 1000L * 15;    // ms
 unsigned long next_action_time = 0;
 bool onthego = false;
@@ -165,6 +167,8 @@ void loop() {
       uint16_t gps_age = 0xFFFF;
 
       if (have_radio) {
+        tx_power_position = data_size; // save this position for future update
+        buf_out_add_byte(tx_power);
         buf_out_add_byte(flags);
         buf_out_add_byte(highByte(volts));
         buf_out_add_byte(lowByte(volts));
@@ -174,9 +178,6 @@ void loop() {
 
         buf_out_add_byte(last_RSSI);
       
-        tx_power_position = data_size; // save this position for future update
-        buf_out_add_byte(tx_power);
-
         uint32_t age = gps.location.age() / 1000;
         if (age < 0xFFFF) {
           gps_age = age;
@@ -220,6 +221,7 @@ void loop() {
             }
             if (i == 1) { // we can send to BT only one temperature, so let it be the first one
               saved_temp = temp;
+              float real_temp = temp * 0.0078125;
               // RB 25 B 27 BG 29 G 31 RG 33 R
               if (temp >= 31 || temp < 25) { digitalWrite(LED_RED, HIGH); }
               if (temp >= 27 && temp < 33) { digitalWrite(LED_GREEN, HIGH); }
@@ -235,6 +237,7 @@ void loop() {
   
       if (have_radio) {
         for (uint8_t i = 0; i < 4; i++) {
+          manager.setHeaderFlags(RH_FLAGS_HAS_POWER_INFO, RH_FLAGS_NONE);
           if (manager.sendtoWait(data, data_size, SERVER_ADDRESS)) {
             last_RSSI = driver.lastRssi();
             if (tx_power > RFM_MIN_POWER) tx_power--;

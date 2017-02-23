@@ -10,6 +10,7 @@
 #include "gate_config.h"
 
 #define BUF_OUT_MAX_MESSAGE_LEN (RH_RF69_MAX_MESSAGE_LEN + 10)
+#define RH_FLAGS_HAS_POWER_INFO 0x01
 
 RH_RF69 driver;
 RHReliableDatagram manager(driver, MY_ADDRESS);
@@ -20,12 +21,14 @@ boolean stringComplete = false;
 uint8_t buf_out[BUF_OUT_MAX_MESSAGE_LEN];
 uint8_t buf_out_pos = 0;
 uint8_t buf_in[RH_RF69_MAX_MESSAGE_LEN];
+uint8_t seenIds[255];
 
 uint8_t last_RSSI = 0;
 int8_t tx_power = 0;
 
 void setup() {
   inputString.reserve(200);
+  memset(seenIds, 0, sizeof(seenIds));
   Serial.begin(115200);
   while (!Serial) ;
 
@@ -53,24 +56,56 @@ void loop() {
   uint8_t to;
   uint8_t id;
   uint8_t flags;
-  if (manager.recvfromAck(buf_in, &len, &from, &to, &id, &flags)) {
-    driver.setModeIdle(); // for temperatureRead
-    int8_t temp = driver.temperatureRead();
-    uint8_t last_RSSI = driver.lastRssi();
-    buf_out_add_byte(temp);
+  int8_t temp;
+  uint8_t last_RSSI;
 
-    buf_out_add_byte(last_RSSI);
-    buf_out_add_byte(tx_power);
+  // Do not need to check "driver.mode() != RHModeTx" because available checks this for us
+  // Get the message before its clobbered by the ACK (shared rx and tx buffer in some drivers
+  if (manager.available() && manager.recvfrom(buf_in, &len, &from, &to, &id, &flags)) {
+    // Never ACK an ACK
+    if (!(flags & RH_FLAGS_ACK)) {
+      // Its a normal message for this node, not an ACK
+      driver.setModeIdle(); // for temperatureRead
+      temp = driver.temperatureRead();
+      last_RSSI = driver.lastRssi();
+      if (to != RH_BROADCAST_ADDRESS) {
+        // Its not a broadcast, so ACK it
+        // Acknowledge message with ACK set in flags and ID set to received ID
+        manager.setHeaderId(id);
+        manager.setHeaderFlags(RH_FLAGS_ACK | RH_FLAGS_HAS_POWER_INFO);
+        if (flags & RH_FLAGS_HAS_POWER_INFO) {
+          tx_power = DESIRED_RSSI - last_RSSI + (int8_t)buf_in[0];
+          if (tx_power > RFM_MAX_POWER) {
+            tx_power = RFM_MAX_POWER;
+          } else if (tx_power < RFM_MIN_POWER) {
+            tx_power = RFM_MIN_POWER;
+          }
+        } else {
+          tx_power = RFM_MAX_POWER;
+        }
+        driver.setTxPower(tx_power);
+        uint8_t ack = (uint8_t)tx_power;
+        manager.sendto(&ack, sizeof(ack), from);
+      }
+      // If we have not seen this message before, then we are interested in it
+      if (id != seenIds[from]) {
+        seenIds[from] = id;
+        buf_out_add_byte(temp);
+        buf_out_add_byte(last_RSSI);
+        buf_out_add_byte(tx_power);
+        buf_out_add_byte(len);
+        buf_out_add_byte(from);
+        buf_out_add_byte(to);
+        buf_out_add_byte(id);
+        buf_out_add_byte(flags);
 
-    buf_out_add_byte(len);
-    buf_out_add_byte(from);
-    buf_out_add_byte(to);
-    buf_out_add_byte(id);
-    buf_out_add_byte(flags);
-
-    buf_out_add_array(buf_in, len);
-    send_to(SERVER_ADDRESS);
+        buf_out_add_array(buf_in, len);
+        send_to(SERVER_ADDRESS);
+      }
+      // Else just re-ack it and wait for a new one
+    }
   }
+  // No message for us available
 }
 
 void serialEvent() {

@@ -3,6 +3,7 @@
 
 #define RFM_MIN_POWER -18
 #define RFM_MAX_POWER 13
+#define DESIRED_RSSI -80
 
 #define STX 0x02
 #define ETX 0x03
