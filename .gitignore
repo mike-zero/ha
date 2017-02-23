@@ -1,2 +1,4 @@
 config.h
 node/node_config.h
+telemetry_pram/tm_config.h
+gate_RFM_Serial/gate_config.h
