@@ -36,11 +36,17 @@ const unsigned long main_period = 1000L * 15;    // ms
 unsigned long next_action_time = 0;
 bool onthego = false;
 
+unsigned long next_indication_time = 0;
+unsigned long indication_period = 2000L; // ms
+uint16_t indication_step_duration = 25; // ms
+uint8_t indication_step = 0;
+
 RH_RF69 driver;
 RHReliableDatagram manager(driver, MY_ADDRESS);
 uint8_t last_RSSI = 0;
 int8_t tx_power = -18;
 bool have_radio = false;
+bool radio_link_ok = false;
 
 const long InternalReferenceVoltage = 1100;  // Adjust this value to your board's specific internal BG voltage
 
@@ -49,6 +55,7 @@ DallasTemperature sensors(&ds);
 DeviceAddress ow_addr;
 
 int32_t saved_temp = DEVICE_DISCONNECTED_RAW;
+float real_temp = 0;
 
 TinyGPSPlus gps;
 
@@ -146,6 +153,42 @@ void setup() {
 
 void yield() {
   while (GPSSerial.available()) gps.encode(GPSSerial.read());
+  if (((signed long)(millis() - next_indication_time)) >= 0) {
+    uint16_t time_in_period = millis() % indication_period;
+    uint8_t step_number = time_in_period / indication_step_duration;
+    switch (step_number) {
+      case 0:
+        // BR 25 B 27 BG 29 G 31 GR 33 R
+        if (real_temp < 29) {
+          digitalWrite(LED_BLUE, HIGH);
+        } else if (real_temp < 33) {
+          digitalWrite(LED_GREEN, HIGH);
+        } else {
+          digitalWrite(LED_RED, HIGH);
+        }
+        break;
+      case 4:
+        if (real_temp < 25 || real_temp >= 31 && real_temp < 33) {
+          digitalWrite(LED_BLUE, LOW);
+          digitalWrite(LED_GREEN, LOW);
+          digitalWrite(LED_RED, HIGH);
+        } else if (real_temp >= 27 && real_temp < 29) {
+          digitalWrite(LED_BLUE, LOW);
+          digitalWrite(LED_GREEN, HIGH);
+        }
+        break;
+      case 20:
+        digitalWrite(radio_link_ok ? LED_GREEN : LED_RED, HIGH);
+        break;
+      case 8:
+      case 21:
+        digitalWrite(LED_RED, LOW);
+        digitalWrite(LED_GREEN, LOW);
+        digitalWrite(LED_BLUE, LOW);
+        break;
+    }
+    next_indication_time = int(millis() / indication_step_duration + 1) * indication_step_duration;
+  }
 }
 
 void loop() {
@@ -221,11 +264,7 @@ void loop() {
             }
             if (i == 1) { // we can send to BT only one temperature, so let it be the first one
               saved_temp = temp;
-              float real_temp = temp * 0.0078125;
-              // RB 25 B 27 BG 29 G 31 RG 33 R
-              if (temp >= 31 || temp < 25) { digitalWrite(LED_RED, HIGH); }
-              if (temp >= 27 && temp < 33) { digitalWrite(LED_GREEN, HIGH); }
-              if (temp < 29) { digitalWrite(LED_BLUE, HIGH); }
+              real_temp = temp * 0.0078125;
               BT_send_temp(temp);
             }
           }
@@ -236,9 +275,11 @@ void loop() {
       }
   
       if (have_radio) {
+        radio_link_ok = false;
         for (uint8_t i = 0; i < 4; i++) {
           manager.setHeaderFlags(RH_FLAGS_HAS_POWER_INFO, RH_FLAGS_NONE);
           if (manager.sendtoWait(data, data_size, SERVER_ADDRESS)) {
+            radio_link_ok = true;
             last_RSSI = driver.lastRssi();
             if (tx_power > RFM_MIN_POWER) tx_power--;
             data[tx_power_position] = tx_power;
@@ -254,9 +295,6 @@ void loop() {
           }
         }
       }
-      digitalWrite(LED_RED, LOW);
-      digitalWrite(LED_GREEN, LOW);
-      digitalWrite(LED_BLUE, LOW);
     } else {    // just start the measure
       sensors.requestTemperatures();
       next_action_time += 750;  // hardcoded for 12 bit resolution
