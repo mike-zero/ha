@@ -93,6 +93,11 @@ void setup() {
   GPSSerial.begin(9600);
   GPSSerial.println(F("$PSRF100,1,57600,8,1,0*36"));
   GPSSerial.begin(57600);
+  GPSSerial.println(F("$PSRF103,02,00,00,01*26")); // disable GSA
+  GPSSerial.println(F("$PSRF103,03,00,00,01*27")); // disable GSV
+  GPSSerial.println(F("$PSRF103,05,00,00,01*21")); // disable VTG
+  GPSSerial.println(F("$PSRF103,00,00,01,01*25")); // GGA 1 pps
+  GPSSerial.println(F("$PSRF103,04,00,01,01*21")); // RMC 1 pps
 
   analogReference(INTERNAL);
   analogRead(A0);  // force voltage reference to be turned on
