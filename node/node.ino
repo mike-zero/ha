@@ -3,13 +3,12 @@
  * and/or UIPEthernet (ENC28J60 module).
  * 
  * Common abilities: A/D GPIO read/write, impulse counter,
- * 1-wire thermometers (DS18B20), DHT22 
+ * 1-wire thermometers (DS18B20), DHT22
  */
 
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <dht.h>
-
 #include "node_config.h"
 #include "node.h"
 
@@ -17,11 +16,13 @@
 #include <UIPEthernet.h>
 #endif
 
+// uint8_t configured = 0;
 uint8_t debug = 0;
-uint8_t textmode = 0;
 
-uint8_t buf_in[CH_COUNT][BUF_LEN];
-uint8_t buf_pos[CH_COUNT];
+uint8_t buf_in[BUF_LEN];
+uint16_t buf_in_pos = 0;
+uint8_t buf_out[BUF_LEN];
+uint16_t buf_out_pos = 0;
 
 uint16_t DHT_pins = 0;
 uint16_t OW_pins = 0;
@@ -35,68 +36,185 @@ IPAddress myIP(IP);
 EthernetServer server = EthernetServer(1000);
 #endif
 
-uint8_t term = '\n';
+uint8_t serial_state = SERIAL_STATE_READY;
+uint8_t addr = 0;
+uint8_t addr_from = 0;
 
 void setup() {
-  memset(buf_pos, 0, sizeof(buf_pos));
-  Serial.begin(115200);
-  Serial.print(F("Node #"));
-  Serial.println(NODE_ID);
+  memset(buf_in, 0, sizeof(buf_in));
+  memset(buf_out, 0, sizeof(buf_out));
 #ifdef ETHERNET_ENABLE
   eth_init();
+#else
+  #ifdef RS485_TX_EN
+    digitalWrite(RS485_TX_EN, LOW);
+    pinMode(RS485_TX_EN, OUTPUT);
+  #endif
+
+  Serial.begin(115200);
 #endif
+
 #ifdef LED
   pinMode(LED, OUTPUT);
   digitalWrite(LED, LOW);
 #endif
-  Serial.print(F("Free RAM = "));
-  Serial.print(freeRam());
-  Serial.println();
+
+  // Say "Hi! I'm here!" to everybody
+  buf_out_add_byte(0x00);
+  send_to(BROADCAST_ID);
+}
+
+void reset_serial_state() {
+  buf_in_pos = 0;
+  serial_state = SERIAL_STATE_READY;
 }
 
 void loop() {
-  // Serial
-  while (Serial.available() > 0) {
-    char thisChar = Serial.read();
-    process_byte(thisChar, CH_SERIAL, &Serial);
-  }
-
   // Ethernet
 #ifdef ETHERNET_ENABLE
   if (EthernetClient client = server.available()) {
-    buf_pos[CH_ETH] = 0;
+    buf_in_pos = 0;
     while (client.available() > 0) {
       char thisChar = client.read();
-      process_byte(thisChar, CH_ETH, &client);
+      process_byte(thisChar);
     }
-    if (buf_pos[CH_ETH] > 0) {
-      process_byte(term, CH_ETH, &client);
+    if (buf_in_pos > 0) {
+      process_byte(ETX);    // !!! is this an error if there is no ETX at the end of packet? May be better to discard this?
     }
-    // client.println("Bye!");
     client.stop();
-    buf_pos[CH_ETH] = 0;
+    buf_in_pos = 0;
+  }
+#else
+  // Serial
+  while (Serial.available() > 0) {
+    uint8_t thisChar = Serial.read();
+/*
+Serial.write(0xEE);
+Serial.write(thisChar);
+Serial.write(serial_state);
+Serial.write(buf_in_pos);
+Serial.write(buf_in_pos > 0 ? buf_in[buf_in_pos-1] : 0xCC);
+// Serial.write('\n');
+*/
+    if (thisChar == STX) { // start packet resets any state and discard all received data
+      buf_in_pos = 0;
+      serial_state = SERIAL_STATE_ADDR_H;
+    } else if (thisChar == ETX) {
+      if (serial_state == SERIAL_STATE_MSG_H && buf_in_pos > 0) {
+        process_command();
+        if (buf_out_pos > 0 && addr_from > 0) {
+          send_to(addr_from);
+          addr_from = 0;
+        }
+      }
+      reset_serial_state();
+    } else if ((thisChar & 0x0F) == ((~thisChar >> 4) & 0x0F)) {
+      if (serial_state == SERIAL_STATE_ADDR_H) {
+        addr = thisChar & 0xF0;
+        serial_state = SERIAL_STATE_ADDR_L;
+      } else if (serial_state == SERIAL_STATE_ADDR_L) {
+        addr |= thisChar & 0x0F;
+        if (addr == NODE_ID || addr == BROADCAST_ID) {
+          serial_state = SERIAL_STATE_FROM_H;
+        } else {
+          reset_serial_state();
+        }
+      } else if (serial_state == SERIAL_STATE_FROM_H) {
+        addr_from = thisChar & 0xF0;
+        serial_state = SERIAL_STATE_FROM_L;
+      } else if (serial_state == SERIAL_STATE_FROM_L) {
+        addr_from |= thisChar & 0x0F;
+        serial_state = SERIAL_STATE_MSG_H;
+      } else if (serial_state == SERIAL_STATE_MSG_H) {
+        if (buf_in_pos < BUF_LEN) {
+          buf_in[buf_in_pos] = thisChar & 0xF0;
+          serial_state = SERIAL_STATE_MSG_L;
+        } else { // discard too long packet
+          reset_serial_state();
+        }
+      } else if (serial_state == SERIAL_STATE_MSG_L) {
+        buf_in[buf_in_pos++] |= thisChar & 0x0F;
+        serial_state = SERIAL_STATE_MSG_H;
+      }
+    } else { // error
+      reset_serial_state();
+//Serial.write(0xDD);
+    }
+//Serial.write('\n');
   }
 #endif
 }
 
-size_t process_byte(uint8_t inbyte, uint8_t channel_id, Stream* strm) {
+void buf_out_add_byte(uint8_t value) {
+  if (buf_out_pos < BUF_LEN) {
+    buf_out[buf_out_pos++] = value;
+  } else if (buf_out_pos == BUF_LEN) {
+    buf_out_pos = BUF_LEN+1;  // just a buffer overflow mark
+  }
+}
+
+void buf_out_add_array(uint8_t *temp_buf, size_t buf_size) {
+  for (uint8_t i = 0; i < buf_size; i++) {
+    buf_out_add_byte(temp_buf[i]);
+  }
+}
+
+void buf_out_add_string(const char *str) {
+  for (uint8_t i = 0; i < strlen(str); i++) {
+    buf_out_add_byte(str[i]);
+  }
+}
+
+void serial_send_byte_as_two(uint8_t val) {
+  Serial.write((val & 0xF0) | ((~val >> 4) & 0x0F));
+  Serial.write((val & 0x0F) | ((~val << 4) & 0xF0));
+}
+
+int16_t send_to(uint8_t addr_to) {
+  if (buf_out_pos > BUF_LEN) { // buffer overflow
+    buf_out_pos = 0;
+    return 0;
+  }
+#ifdef RS485_TX_EN
+  digitalWrite(RS485_TX_EN, HIGH);
+  pinMode(RS485_TX_EN, OUTPUT);
+#endif
+  Serial.write(STX);
+  serial_send_byte_as_two(addr_to);
+  serial_send_byte_as_two(NODE_ID);
+  for (uint8_t i = 0; i < buf_out_pos; i++) {
+    serial_send_byte_as_two(buf_out[i]);
+  }
+  Serial.write(ETX);
+  Serial.flush();
+#ifdef RS485_TX_EN
+  digitalWrite(RS485_TX_EN, LOW);
+#endif
+  buf_out_pos = 0;
+  return 1;
+}
+
+size_t process_byte(uint8_t inbyte) {
   size_t res = 0;
-  if (inbyte == term) {
-    if (buf_pos[channel_id] > 0) {
-      process_command(channel_id, strm);
+  if (inbyte == ETX) {
+    if (buf_in_pos > 0) {
+      process_command();
+      if (buf_out_pos > 0) {
+        send_to(addr_from);
+      }
     }
-    buf_pos[channel_id] = 0;
+    buf_in_pos = 0;
   } else {
-    if (buf_pos[channel_id] < BUF_LEN) {
-      buf_in[channel_id][buf_pos[channel_id]++] = inbyte;
+    if (buf_in_pos < BUF_LEN) {
+      buf_in[buf_in_pos++] = inbyte;
     }
   }
   return res;
 }
 
-void process_command(uint8_t channel_id, Stream* strm) {
-  uint8_t* msg = buf_in[channel_id];
-  size_t size = buf_pos[channel_id];
+void process_command() {
+  uint8_t* msg = buf_in;
+  size_t size = buf_in_pos;
 #ifdef LED
   digitalWrite(LED, HIGH);
 #endif
@@ -114,28 +232,6 @@ void process_command(uint8_t channel_id, Stream* strm) {
     Serial.println("|");
   }
   switch (msg[0]) {
-    case 'D': // Debug
-      if (size > 1) {
-        debug = (msg[1] == 0 || msg[1] == '0') ? 0 : 1;
-      } else {
-        debug = !debug;
-      }
-      strm->write('D');
-      strm->write('0' + (debug ? 1 : 0));
-      Serial.print(F("Debug set to "));
-      Serial.println(debug ? "ON" : "OFF");
-      break;
-    case 'b': // textmode
-      if (size > 1) {
-        textmode = (msg[1] == 0 || msg[1] == '0') ? 0 : 1;
-      } else {
-        textmode = !textmode;
-      }
-      strm->write('b');
-      strm->write('0' + (textmode ? 1 : 0));
-      Serial.print(F("textmode set to "));
-      Serial.println(textmode ? "ON" : "OFF");
-      break;
     case 'R': // Read
       if (size == 4) {
         uint8_t mask_d = msg[2] & 0xFF;
@@ -143,45 +239,42 @@ void process_command(uint8_t channel_id, Stream* strm) {
         uint8_t mask_a = msg[1] & 0xFF;
 
         if (mask_d) { 
-          strm->write(DDRD & mask_d);
-          strm->write(PORTD & mask_d);
-          strm->write(PIND & mask_d);
+          buf_out_add_byte(DDRD & mask_d);
+          buf_out_add_byte(PORTD & mask_d);
+          buf_out_add_byte(PIND & mask_d);
         }
         if (mask_b) { 
-          strm->write(DDRB & mask_b);
-          strm->write(PORTB & mask_b);
-          strm->write(PINB & mask_b);
+          buf_out_add_byte(DDRB & mask_b);
+          buf_out_add_byte(PORTB & mask_b);
+          buf_out_add_byte(PINB & mask_b);
         }
 
         uint8_t pin = 0;
         int val;
-        strm->write(mask_a);
+        buf_out_add_byte(mask_a);
         while (mask_a > 0) {
           if ((mask_a & 1) == 1) {
             val = analogRead(pin);
-            strm->write(highByte(val));
-            strm->write(lowByte(val));
+            buf_out_add_byte(highByte(val));
+            buf_out_add_byte(lowByte(val));
+/*
             if (debug) {
               Serial.print("analogRead(");
               Serial.print(pin);
               Serial.print(")=");
               Serial.println(val);
             }
+*/
           }
           pin++;
           mask_a >>= 1;
         }
       } else {
-        strm->write("R-err");
+        buf_out_add_string("R-err");
       }
       break;
-    case 'I': // Init
-      if (debug) Serial.println("Init!");
-      strm->write("I");
-      break;
     case 'T': // Test
-      if (debug) Serial.println("Test:");
-      strm->write("T");
+      buf_out_add_string("T");
       {
         uint16_t mask = GPIO_MASK; // (msg[1] << 8) & msg[2];
         uint16_t mask_ow = 0;
@@ -193,6 +286,7 @@ void process_command(uint8_t channel_id, Stream* strm) {
             int chk = DHT.read22(pin);
             if (chk == DHTLIB_OK) {
               mask_dht |= 1 << pin;
+/*
               if (debug) {
                 Serial.print("#0 DHT22 found on pin ");
                 Serial.print(pin);
@@ -202,14 +296,15 @@ void process_command(uint8_t channel_id, Stream* strm) {
                 Serial.print(DHT.temperature, 1);
                 Serial.println();
               }
+*/
             }
           }
           pin++;
           mask >>= 1;
         }
         unsigned long dht_conv_ready_time = millis() + 450; // minimum tested is 410 at -15*C and 370 at +24*C, see libraries/DHTlib/examples/dht_tuning/dht_tuning.ino
-        strm->write(highByte(mask_dht));
-        strm->write(lowByte(mask_dht));
+        buf_out_add_byte(highByte(mask_dht));
+        buf_out_add_byte(lowByte(mask_dht));
 
         mask = GPIO_MASK & ~ mask_dht;
         pin = 0;
@@ -221,7 +316,7 @@ void process_command(uint8_t channel_id, Stream* strm) {
             sensors.begin();
             sensors.setWaitForConversion(0);
             numberOfDevices += sensors.getDeviceCount();
-            if (sensors.getDeviceCount() > 0) {	// !!!!!!!!!!!! ��������� � ������ � �������� ����� ������� ����������; � ���������� �������� ����� ������� (������/��������, ���� �� ���������)
+            if (sensors.getDeviceCount() > 0) {
               sensors.requestTemperatures();
               mask_ow |= 1 << pin;
             }
@@ -230,10 +325,10 @@ void process_command(uint8_t channel_id, Stream* strm) {
           mask >>= 1;
         }
         unsigned long ow_conv_ready_time = millis() + millisToWaitForConversion(TEMPERATURE_PRECISION);
-        //strm->write(highByte(mask_ow));
-        //strm->write(lowByte(mask_ow));
+        //buf_out_add(highByte(mask_ow));
+        //buf_out_add(lowByte(mask_ow));
 
-        strm->write(numberOfDevices);
+        buf_out_add_byte(numberOfDevices);
 
 // ...
 
@@ -246,24 +341,15 @@ void process_command(uint8_t channel_id, Stream* strm) {
             if ((mask & 1) == 1) {
               int chk = DHT.read22(pin);
               if (chk == DHTLIB_OK) {
-                if (debug) {
-                  Serial.print("#1 DHT22 found on pin ");
-                  Serial.print(pin);
-                  Serial.print(": ");
-                  Serial.print(DHT.humidity, 1);
-                  Serial.print(",\t");
-                  Serial.print(DHT.temperature, 1);
-                  Serial.println();
-                }
                 tmp = DHT.temperature * 10;
-                strm->write(highByte(tmp));
-                strm->write(lowByte(tmp));
+                buf_out_add_byte(highByte(tmp));
+                buf_out_add_byte(lowByte(tmp));
                 tmp = DHT.humidity * 10;
-                strm->write(highByte(tmp));
-                strm->write(lowByte(tmp));
+                buf_out_add_byte(highByte(tmp));
+                buf_out_add_byte(lowByte(tmp));
               } else {
                 for (uint8_t i = 0; i < 4; i++) {
-                  strm->write(0xFF); // NAN?
+                  buf_out_add_byte(0xFF); // NAN?
                 }
               }
             }
@@ -280,11 +366,13 @@ void process_command(uint8_t channel_id, Stream* strm) {
           pin = 0;
           while (mask > 0 && numberOfDevices > 0) {
             if ((mask & 1) == 1) {
+/*
               if (debug) {
                 Serial.print("ow[");
                 Serial.print(pin);
                 Serial.print("]");
               }
+*/
               OneWire ds(pin);
 
               DallasTemperature sensors(&ds);
@@ -293,6 +381,7 @@ void process_command(uint8_t channel_id, Stream* strm) {
 
                 ds.reset_search();
                 while (ds.search(ow_addr)  && numberOfDevices > 0) {
+/*
                   if (debug) {
                     for (uint8_t i = 0; i < 8; i++) {
                       Serial.print(" ");
@@ -303,40 +392,45 @@ void process_command(uint8_t channel_id, Stream* strm) {
                     }
                     Serial.print(" | ");
                   }
+*/
                   if (ow_addr[0] == 0x28) {
                     int16_t temp = sensors.getTemp(ow_addr);
+/*
                     if (debug) {
                       Serial.print(": ");
                       Serial.print(sensors.rawToCelsius(temp));
                     }
+*/
                     if (temp != DEVICE_DISCONNECTED_RAW) {
-                      strm->write(ow_addr, sizeof(ow_addr));
-                      strm->write(highByte(temp));
-                      strm->write(lowByte(temp));
+                      buf_out_add_array(ow_addr, sizeof(ow_addr));
+                      buf_out_add_byte(highByte(temp));
+                      buf_out_add_byte(lowByte(temp));
                     }
                     sensors.setResolution(ow_addr, TEMPERATURE_PRECISION);  // for next time
                   }
                   --numberOfDevices;
                 }
+/*
                 if (debug) {
                   Serial.println();
                 }
+*/
             }
             pin++;
             mask >>= 1;
           }
           while (numberOfDevices > 0) {
             for (int i=0; i<10; i++) {  // placeholder for 8 bytes address and 2 bytes of payload
-              strm->write(0xFF);
+              buf_out_add_byte(0xFF);
             }
           }
         }
       }
-      // strm->write("T");
+      // buf_out_add("T");
       break;
     case 'S': // Scan
-      if (debug) Serial.println("Scan...");
-      strm->write("S");
+//      if (debug) Serial.println("Scan...");
+      buf_out_add_string("S");
       DHT_pins = 0;
       uint16_t mask;
       mask = GPIO_MASK;
@@ -347,17 +441,19 @@ void process_command(uint8_t channel_id, Stream* strm) {
           int chk = DHT.read22(pin);
           if (chk == DHTLIB_OK) {
             DHT_pins |= 1 << pin;
+/*
             if (debug) {
               Serial.print("DHT22 found on pin ");
               Serial.println(pin);
             }
+*/
           }
         }
         pin++;
         mask >>= 1;
       }
-      strm->write(highByte(DHT_pins));
-      strm->write(lowByte(DHT_pins));
+      buf_out_add_byte(highByte(DHT_pins));
+      buf_out_add_byte(lowByte(DHT_pins));
 
       uint8_t numberOfDevices; // Number of temperature devices found
       DeviceAddress tempDeviceAddress; // We'll use this variable to store a found device address
@@ -372,8 +468,8 @@ void process_command(uint8_t channel_id, Stream* strm) {
           numberOfDevices = sensors.getDeviceCount();
           if (numberOfDevices > 0) {
             OW_pins |= 1 << pin;
-            strm->write(pin);
-            strm->write(numberOfDevices);
+            buf_out_add_byte(pin);
+            buf_out_add_byte(numberOfDevices);
             if (debug) {
               Serial.print("ow[");
               Serial.print(pin);
@@ -384,7 +480,7 @@ void process_command(uint8_t channel_id, Stream* strm) {
             if (sensors.isParasitePowerMode()) Serial.println("Parasite power is ON");
             for (int i=0; i<numberOfDevices; i++) {
               if (sensors.getAddress(tempDeviceAddress, i)) {
-                strm->write(tempDeviceAddress, sizeof(tempDeviceAddress));
+                buf_out_add_array(tempDeviceAddress, sizeof(tempDeviceAddress));
                 if (debug) {
                   Serial.print("Found device ");
                   Serial.print(i, DEC);
@@ -399,8 +495,8 @@ void process_command(uint8_t channel_id, Stream* strm) {
         pin++;
         mask >>= 1;
       }
-      // strm->write(highByte(OW_pins));
-      // strm->write(lowByte(OW_pins));
+      // buf_out_add(highByte(OW_pins));
+      // buf_out_add(lowByte(OW_pins));
       break;
     case 'Z': // Reset (zero) some parts or all
 #ifdef ETH_RESET_PIN
@@ -408,18 +504,13 @@ void process_command(uint8_t channel_id, Stream* strm) {
         eth_init();
       }
 #endif
-      if (debug) Serial.println("Init!");
+//      if (debug) Serial.println("Init!");
       break;
     case 'l': // LED: 0, 1, Auto
       break;
     default:
-      Serial.println(F("Unknown command!"));
+      Serial.println(F("Unknown command!"));	// !!!!!
       break;
-  }
-  if (debug) {
-    Serial.print(F("Free RAM = "));
-    Serial.print(freeRam());
-    Serial.println();
   }
 #ifdef LED
   digitalWrite(LED, LOW);
@@ -466,5 +557,4 @@ int16_t millisToWaitForConversion(uint8_t bitResolution){
     default:
         return 750;
     }
-
 }

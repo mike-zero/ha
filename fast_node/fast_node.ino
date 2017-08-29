@@ -18,8 +18,8 @@
 #define DATA_SUM 0
 #define ANALOG_DATA_BIG_STATES 1
 
-uint16_t report_period_millis = 5 * 1000;
-uint16_t fast_measures_per_report = 1000;
+uint16_t report_period_millis = 1 * 1000;
+uint16_t fast_measures_per_report = 200;
 uint16_t slow_measures_per_report = 2;
 unsigned long next_report_time = 0;
 unsigned long next_fast_measure = 0;
@@ -94,6 +94,7 @@ void loop() {
 
 void report() {
 	next_report_time += report_period_millis;
+  Serial.print(millis());
 	Serial.print(" count_fast=");
 	Serial.print(count_fast);
 	Serial.print(" count_slow=");
@@ -147,6 +148,8 @@ void report() {
 		mask >>= 1;
 	}
 
+  Serial.print(" ");
+  Serial.print(millis());
 	Serial.println();
 	count_fast = 0;
 	count_slow = 0;

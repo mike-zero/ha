@@ -34,7 +34,11 @@
 
 const unsigned long main_period = 1000L * 15;    // ms
 unsigned long next_action_time = 0;
+unsigned long last_good_transmit_time = 0;
+unsigned long last_sent_location_commit_time = 0;
 bool onthego = false;
+bool config_changed = false;
+bool data_changed = false;
 
 unsigned long next_indication_time = 0;
 unsigned long indication_period = 2000L; // ms
@@ -52,9 +56,12 @@ const long InternalReferenceVoltage = 1100;  // Adjust this value to your board'
 
 OneWire ds(PIN_ONEWIRE);
 DallasTemperature sensors(&ds);
-DeviceAddress ow_addr;
+DeviceAddress ow_addr[ONE_WIRE_MAX_COUNT];
+int16_t ow_temp[ONE_WIRE_MAX_COUNT];
 
-int32_t saved_temp = DEVICE_DISCONNECTED_RAW;
+uint8_t ow_device_count = 0;
+uint8_t ow_config_crc = 0;
+int16_t saved_temp = DEVICE_DISCONNECTED_RAW;
 float real_temp = 0;
 
 TinyGPSPlus gps;
@@ -86,7 +93,6 @@ void setup() {
   pinMode(LED_BLUE, OUTPUT);
 
   BTinputString.reserve(64);
-
 
   Serial.begin(9600);  // BLE module
   
@@ -154,6 +160,133 @@ void setup() {
   sensors.setWaitForConversion(0);
   sensors.begin();
   next_action_time = millis();
+  ow_scan();
+}
+
+void ow_scan() {
+  DeviceAddress addr;
+  uint8_t old_ow_device_count = ow_device_count;
+  uint8_t old_ow_config_crc = ow_config_crc;
+  ow_config_crc = 0;
+  uint16_t temp_crc;
+
+  ds.reset_search();
+  while (ow_device_count < ONE_WIRE_MAX_COUNT && ds.search(addr)) {
+    if (addr[0] == 0x28) {
+      temp_crc = addr[7] << ow_device_count;
+      ow_config_crc ^= (highByte(temp_crc) | lowByte(temp_crc));
+      // ow_addr[ow_device_count++] = addr;
+      memcpy(ow_addr[ow_device_count++], addr, sizeof(addr));
+    }
+  }
+  if (ow_device_count != old_ow_device_count || ow_config_crc != old_ow_config_crc) {
+    config_changed = true;
+  }
+}
+
+void ow_read_results() {
+  if (ow_device_count > 0) {
+    for (uint8_t i = 0; i < ow_device_count; i++) {
+      ow_temp[i] = sensors.getTemp(ow_addr[i]);
+      if (ow_temp[i] != DEVICE_DISCONNECTED_RAW) {
+        if (i == 0) { // we can send to BT only one temperature, so let it be the first one
+          saved_temp = ow_temp[i];
+          real_temp = saved_temp * 0.0078125;
+          BT_send_temp(saved_temp);
+        }
+      }
+    }
+  }
+}
+
+bool send_config() {
+  radio_buf_put_header();
+  buf_out_add_byte(0x03);
+  buf_out_add_byte(ow_config_crc);
+  buf_out_add_byte(ow_device_count);
+  buf_out_add_array(ow_addr[0], ow_device_count * sizeof(DeviceAddress));
+//  uint8_t ow_state = OW_STATE_CONFIG_SENT;
+  return radio_send();
+}
+
+bool send_telemetry() {
+  bool new_location = gps.location.isValid() && gps.location.age() < (signed long)(millis() - last_sent_location_commit_time);
+
+  uint8_t flags = (new_location           ?  1 : 0)
+                | (BT_connected           ?  2 : 0)
+                ;
+  driver.setModeIdle(); // for temperatureRead
+  int8_t radio_temp = driver.temperatureRead();
+  int volts = battery_voltage();
+
+  radio_buf_put_header();
+  buf_out_add_byte(0x15);
+
+  buf_out_add_byte(flags);
+  buf_out_add_byte(ow_config_crc);
+  buf_out_add_byte(highByte(volts));
+  buf_out_add_byte(lowByte(volts));
+  buf_out_add_byte(radio_temp);
+
+  if (new_location) {
+    uint32_t age = gps.location.age() / 1000;
+    uint16_t gps_age = age < 0xFFFF ? age : 0xFFFF;
+    buf_out_add_byte(highByte(gps_age));
+    buf_out_add_byte(lowByte(gps_age));
+
+    int32_t lat = gps.location.lat() * 10000000;
+    buf_out_add_i32(lat);
+    int32_t lng = gps.location.lng() * 10000000;
+    buf_out_add_i32(lng);
+
+    uint16_t hdopx10 = gps.hdop.isValid() ? gps.hdop.value() / 10 : 0xFF;
+    buf_out_add_byte(hdopx10 <= 0xFF ? (uint8_t)hdopx10 : 0xFF);
+
+    uint16_t gps_course = gps.course.isValid() ? gps.course.value() : 0xFFFF;
+    buf_out_add_byte(highByte(gps_course));
+    buf_out_add_byte(lowByte(gps_course));
+
+    uint16_t gps_speed = gps.speed.isValid() ? gps.speed.value() : 0xFFFF;
+    buf_out_add_byte(highByte(gps_speed));
+    buf_out_add_byte(lowByte(gps_speed));
+  }
+
+  buf_out_add_byte(ow_device_count);
+  buf_out_add_array((uint8_t*)ow_temp[0], ow_device_count * sizeof(int16_t));
+  bool packet_sent = radio_send();
+  if (packet_sent && new_location) {
+    last_sent_location_commit_time = millis() - gps.location.age();
+  }
+  return radio_send();
+
+}
+
+void radio_buf_put_header() {
+  data_size = 0;
+  buf_out_add_byte(tx_power);
+  buf_out_add_byte(last_RSSI);
+}
+
+bool radio_send() {
+  manager.setHeaderFlags(RH_FLAGS_HAS_POWER_INFO, RH_FLAGS_NONE);
+  driver.setTxPower(tx_power);
+  if (manager.sendtoWait(data, data_size, SERVER_ADDRESS)) {
+    //radio_link_ok = true;
+    last_good_transmit_time = millis();
+    last_RSSI = driver.lastRssi();
+    if (tx_power > RFM_MIN_POWER) tx_power--;
+    // data[tx_power_position] = tx_power;
+    // driver.setTxPower(tx_power);
+    return true;
+  } else {
+    if (tx_power < RFM_MAX_POWER) {
+      tx_power += 3;
+      if (tx_power > RFM_MAX_POWER) tx_power = RFM_MAX_POWER;
+      // data[tx_power_position] = tx_power;
+      // driver.setTxPower(tx_power);
+    }
+    return false;
+  }
 }
 
 void yield() {
@@ -197,119 +330,42 @@ void yield() {
 }
 
 void loop() {
-  if (((signed long)(millis() - next_action_time)) >= 0) {
-    if (onthego) {  // measure should be done, let's read the results
-      next_action_time += main_period - 750;  // hardcoded for 12 bit resolution
+  if (gps.date.isUpdated()) { // we've just got a fresh RMC message from GPS, it should be the last message in a packet
+    gps.date.value(); // reset the "gps.date.updated" flag
+//    uint8_t sec = gps.time.second();
+    uint16_t transmit_period = gps.location.age() <= 30000 ? 15 : 60; // Seconds. No GPS fix - probably no radio link, no need to transmit often
+//    unsigned long last_good_transmit_age = (millis() - last_good_transmit_time) / 1000; // seconds
+    // uint8_t step = (60 * gps.time.minute() + gps.time.second()) % transmit_period;
+    uint8_t step = gps.time.second() % transmit_period;
 
-      uint8_t flags = (have_radio             ?  1 : 0) 
-//                    | (have_sd                ?  2 : 0) 
-                    | (gps.location.isValid() ?  4 : 0)
-                    | (BT_connected           ?  8 : 0)
-                    ;
-      data_size = 0;
-      int volts = battery_voltage();
-      uint8_t tx_power_position = 0;
-      uint8_t ds_counter_position = 0;
-
-      int8_t radio_temp = -128;
-      uint16_t gps_age = 0xFFFF;
-
-      if (have_radio) {
-        tx_power_position = data_size; // save this position for future update
-        buf_out_add_byte(tx_power);
-        buf_out_add_byte(flags);
-        buf_out_add_byte(highByte(volts));
-        buf_out_add_byte(lowByte(volts));
-        driver.setModeIdle(); // for temperatureRead
-        radio_temp = driver.temperatureRead();
-        buf_out_add_byte(radio_temp);
-
-        buf_out_add_byte(last_RSSI);
-      
-        uint32_t age = gps.location.age() / 1000;
-        if (age < 0xFFFF) {
-          gps_age = age;
-        } else {
-          gps_age = 0xFFFF;
-        }
-        buf_out_add_byte(highByte(gps_age));
-        buf_out_add_byte(lowByte(gps_age));
-
-        int32_t lat = gps.location.lat() * 10000000;
-        buf_out_add_i32(lat);
-        int32_t lng = gps.location.lng() * 10000000;
-        buf_out_add_i32(lng);
-
-        uint16_t hdopx10 = gps.hdop.isValid() ? gps.hdop.value() / 10 : 0xFF;
-        buf_out_add_byte(hdopx10 <= 0xFF ? (uint8_t)hdopx10 : 0xFF);
-
-        uint16_t gps_course = gps.course.isValid() ? gps.course.value() : 0xFFFF;
-        buf_out_add_byte(highByte(gps_course));
-        buf_out_add_byte(lowByte(gps_course));
-
-        uint16_t gps_speed = gps.speed.isValid() ? gps.speed.value() : 0xFFFF;
-        buf_out_add_byte(highByte(gps_speed));
-        buf_out_add_byte(lowByte(gps_speed));
-
-        ds_counter_position = data_size; // save this position for future update
-        buf_out_add_byte(0); // reserve one byte in buffer for counter
-      }
-
-      uint8_t i = 0;
-      ds.reset_search();
-      saved_temp = DEVICE_DISCONNECTED_RAW;
-      while (ds.search(ow_addr)) {
-        if (ow_addr[0] == 0x28) {
-          int32_t temp = sensors.getTemp(ow_addr);
-          if (temp != DEVICE_DISCONNECTED_RAW) {
-            i++;
-            if (have_radio) {
-              buf_out_add_byte(highByte(temp));
-              buf_out_add_byte(lowByte(temp));
-            }
-            if (i == 1) { // we can send to BT only one temperature, so let it be the first one
-              saved_temp = temp;
-              real_temp = temp * 0.0078125;
-              BT_send_temp(temp);
-            }
-          }
-        }
-      }
-      if (i && have_radio) {
-        data[ds_counter_position] = i; // the real count of thermometers
-      }
-  
-      if (have_radio) {
-        radio_link_ok = false;
-        for (uint8_t i = 0; i < 4; i++) {
-          manager.setHeaderFlags(RH_FLAGS_HAS_POWER_INFO, RH_FLAGS_NONE);
-          if (manager.sendtoWait(data, data_size, SERVER_ADDRESS)) {
-            radio_link_ok = true;
-            last_RSSI = driver.lastRssi();
-            if (tx_power > RFM_MIN_POWER) tx_power--;
-            data[tx_power_position] = tx_power;
-            driver.setTxPower(tx_power);
-            break;
-          } else {
-            if (tx_power < RFM_MAX_POWER) {
-              tx_power += 3;
-              if (tx_power > RFM_MAX_POWER) tx_power = RFM_MAX_POWER;
-              data[tx_power_position] = tx_power;
-              driver.setTxPower(tx_power);
-            }
-          }
-        }
-      }
-    } else {    // just start the measure
-      sensors.requestTemperatures();
-      next_action_time += 750;  // hardcoded for 12 bit resolution
+    if (next_action_time && ((signed long)(millis() - next_action_time)) >= 0) {
+        ow_read_results();
+        data_changed = true;
+        next_action_time = 0;
     }
-    onthego = not onthego;
+
+    if (step >= 2 && step <= 5) {
+        if (config_changed) {
+            if (send_config()) {
+                config_changed = false;
+            }
+        }
+        if (!config_changed && data_changed) {
+            if (send_telemetry()) {
+                data_changed = false;
+            }
+        }
+    }
+
+    if (gps.time.second() % OW_PERIOD == 1) {
+        ow_scan();
+        sensors.requestTemperatures();
+        next_action_time = millis() + 750;  // hardcoded for 12 bit resolution
+    }
   }
-  YIELD;
 }
 
-uint8_t BT_send_temp(int32_t temp) {
+uint8_t BT_send_temp(int16_t temp) {
   if (BT_connected) {
     temp *= 0.78125;        // raw_temp / 128 * 100
     // https://www.bluetooth.com/specifications/gatt/viewer?attributeXmlFile=org.bluetooth.characteristic.temperature_measurement.xml

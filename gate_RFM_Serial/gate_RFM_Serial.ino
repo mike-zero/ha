@@ -27,6 +27,8 @@ uint8_t last_RSSI = 0;
 int8_t tx_power = 0;
 
 void setup() {
+  digitalWrite(4, LOW);
+  pinMode(4, OUTPUT);
   inputString.reserve(200);
   memset(seenIds, 0, sizeof(seenIds));
   Serial.begin(115200);
@@ -89,6 +91,7 @@ void loop() {
       }
       // If we have not seen this message before, then we are interested in it
       if (id != seenIds[from]) {
+        digitalWrite(4, LOW);
         seenIds[from] = id;
         buf_out_add_byte(temp);
         buf_out_add_byte(last_RSSI);
@@ -101,6 +104,8 @@ void loop() {
 
         buf_out_add_array(buf_in, len);
         send_to(SERVER_ADDRESS);
+      } else {
+        digitalWrite(4, HIGH);
       }
       // Else just re-ack it and wait for a new one
     }

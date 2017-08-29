@@ -28,11 +28,14 @@ Message types
 0x00 - ping reply. When broadcasted - "Hello, World! I'm here!" May be used as an ACK (need some flags for this?), can send some health status (power voltage, uptime, etc.)
 0x01 - ping request. May be used to get the node status (voltages, uptime, setup values, etc.).
 0x02 - setup the node: GPIO masks for analog and digital inputs, outputs, "onchange" event(s?), counters, automatic measure and send intervals, etc.
+0x03 - node information (sensors list, etc.)
 
 0x10 - Request: start any long-counting measures (DS18B20, DHT22, etc.)
 0x11 - Reply: a long-counting measures (DS18B20, DHT22, etc.) started (if the request was addressed, not broadcast).
 0x12 - Request of the measured values. Should send the max measure age in seconds. If more time elapsed since the last measure, do it again in blocking mode. Zero means infinite? Or not?
 0x13 - scan for 1-wire, DHT22 and other detectable sensors. If configured, check inputs, connected to a "common sensors output" (strobe).
+
+0x15 - Data from sensors (in reply to 0x12 or by timer), respective to sensors list sent in message 0x03
 
 0x20 - set outputs. Masks, IO port values.
 0x30 - program some automation. In -> Out dependencies.
@@ -42,7 +45,6 @@ Message types
 0xFF - NAK or any Error in received packet (CRC, unknown command, etc.)
 
 TODO:
-- Drive the 485 TX_Enable pin
 - Check if channel is free before transmit
 - CRC
 - Message number (magic)
