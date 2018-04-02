@@ -1,0 +1,14 @@
+#define MY_ADDRESS 2
+#define SERVER_ADDRESS 1
+
+#define RFM_MIN_POWER -18
+// #define RFM_MAX_POWER 13
+#define RFM_MAX_POWER -15
+
+#define FREQUENCY 433.92
+uint8_t sync_words[] = {0x2D, 0xD4};
+uint8_t aes_key[] = "0123456789ABCDEF";
+
+// pin 9 - reserve
+// pin 10 SS RFM69
+// pins 11-13 SPI
