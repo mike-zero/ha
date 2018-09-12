@@ -234,10 +234,14 @@ void process_command() {
   switch (msg[0]) {
     case 'R': // Read
       if (size == 4) {
+        buf_out_add_string("R");
+        uint8_t mask_a = msg[1] & 0xFF;
         uint8_t mask_d = msg[2] & 0xFF;
         uint8_t mask_b = msg[3] & 0xFF;
-        uint8_t mask_a = msg[1] & 0xFF;
 
+        buf_out_add_byte(mask_a);
+        buf_out_add_byte(mask_d);
+        buf_out_add_byte(mask_b);
         if (mask_d) { 
           buf_out_add_byte(DDRD & mask_d);
           buf_out_add_byte(PORTD & mask_d);
@@ -251,7 +255,6 @@ void process_command() {
 
         uint8_t pin = 0;
         int val;
-        buf_out_add_byte(mask_a);
         while (mask_a > 0) {
           if ((mask_a & 1) == 1) {
             val = analogRead(pin);
