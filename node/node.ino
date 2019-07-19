@@ -389,7 +389,7 @@ void process_command() {
 //              numberOfDevices = sensors.getDeviceCount();
 
                 ds.reset_search();
-                while (ds.search(ow_addr)  && numberOfDevices > 0) {
+                while (ds.search(ow_addr) && numberOfDevices-- > 0) {
 /*
                   if (debug) {
                     for (uint8_t i = 0; i < 8; i++) {
@@ -417,7 +417,6 @@ void process_command() {
                     }
                     sensors.setResolution(ow_addr, TEMPERATURE_PRECISION);  // for next time
                   }
-                  --numberOfDevices;
                 }
 /*
                 if (debug) {
@@ -428,7 +427,7 @@ void process_command() {
             pin++;
             mask >>= 1;
           }
-          while (numberOfDevices > 0) {
+          while (numberOfDevices-- > 0) {
             for (int i=0; i<10; i++) {  // placeholder for 8 bytes address and 2 bytes of payload
               buf_out_add_byte(0xFF);
             }
